@@ -1,0 +1,74 @@
+Bootstrap: docker
+From: nvcr.io/nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+
+%setup
+    mkdir -p ${SINGULARITY_ROOTFS}/setup_files
+
+%files
+    vortex/pyproject.toml /setup_files/pyproject.toml
+    vortex/vortex/ops /setup_files/vortex-ops
+
+%post
+    # Set working directory for installation
+    cd /
+
+    # Install system dependencies
+    apt-get update && apt-get install -y git python3-pip python3-tomli python3.11 python3.11-dev wget && rm -rf /var/lib/apt/lists/*
+
+   if [ -f /usr/bin/python3.11 ]; then
+        update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 2
+        update-alternatives --set python3 /usr/bin/python3.11
+        update-alternatives --install /usr/bin/python python /usr/bin/python3 1
+        update-alternatives --set python /usr/bin/python3
+    fi
+
+    pip install --upgrade pip
+    pip install --upgrade setuptools wheel
+
+    # Extract dependencies from pyproject
+    cd /setup_files
+    python3 -c 'import tomli;\
+                p = tomli.load(open("pyproject.toml", "rb"))["project"];\
+                print("\n".join(p["dependencies"]))' \
+        > /setup_files/requirements.txt
+
+    # Must install torch first, as transformer engine build process will need it
+    pip install `cat /setup_files/requirements.txt | grep ^torch`
+
+    # manually install transformer_engine with 1.13 per https://github.com/ArcInstitute/evo2/issues/75
+    pip install transformer_engine[pytorch]==1.13 triton ninja
+    pip install -r /setup_files/requirements.txt
+
+    # Move vortex-ops 
+    mkdir -p /usr/src
+    mv /setup_files/vortex-ops /usr/src/
+
+    # Build and install vortex-ops
+    cd /usr/src/vortex-ops/attn && MAX_JOBS=32 pip install -v -e . --no-build-isolation
+
+    git clone --recurse-submodules https://github.com/ArcInstitute/evo2.git
+    cd evo2
+    pip install .
+
+
+    find /opt -name ".git" -type d -exec rm -rf {} +
+    # Remove build directories and cache
+    find /opt -name "build" -type d -exec rm -rf {} +
+    find /opt -name "__pycache__" -type d -exec rm -rf {} +
+    find /opt -name "*.egg-info" -type d -exec rm -rf {} +
+    # Clean pip cache
+    pip cache purge
+    # Remove apt lists
+    apt-get clean
+
+
+%environment
+    export LC_ALL=C
+    export PYTHONPATH=$PYTHONPATH:/setup_files/evo2
+
+%runscript
+    cd /workdir
+    exec "$@"
+
+%labels
+    Version 1.0
